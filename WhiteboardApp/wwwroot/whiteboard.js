@@ -1,7 +1,8 @@
-﻿// ====== Canvas setup ======
-const canvas = document.getElementById("whiteboard");
+﻿const canvas = document.getElementById("whiteboard");
 const ctx = canvas.getContext("2d");
 
+const nameInput = document.getElementById("name");
+const joinBtn = document.getElementById("joinBtn");
 const colorInput = document.getElementById("color");
 const sizeInput = document.getElementById("size");
 const clearBtn = document.getElementById("clearBtn");
@@ -10,7 +11,11 @@ const statusEl = document.getElementById("status");
 let isDrawing = false;
 let lastPoint = null;
 
-// ====== Make canvas crisp ======
+let connection = null;
+let myName = "";
+let joined = false;
+
+// ===== canvas sizing =====
 function resizeCanvasToDisplaySize() {
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -18,29 +23,22 @@ function resizeCanvasToDisplaySize() {
     canvas.width = Math.floor(rect.width * dpr);
     canvas.height = Math.floor(rect.height * dpr);
 
-    // scale drawing coords to CSS pixels
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
 }
-
-window.addEventListener("resize", () => {
-    // NOTE: resizing clears canvas; later we can store strokes if needed
-    resizeCanvasToDisplaySize();
-});
-
+window.addEventListener("resize", () => resizeCanvasToDisplaySize());
 resizeCanvasToDisplaySize();
 
-// ====== Coordinate helper ======
+// ===== coords =====
 function getCanvasPointFromEvent(e) {
     const rect = canvas.getBoundingClientRect();
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-
     return { x: clientX - rect.left, y: clientY - rect.top };
 }
 
-// ====== Draw line helper ======
+// ===== draw helper =====
 function drawLine(from, to, color, size) {
     ctx.strokeStyle = color;
     ctx.lineWidth = size;
@@ -51,89 +49,144 @@ function drawLine(from, to, color, size) {
     ctx.stroke();
 }
 
-// ====== SignalR connection ======
-let connection = null;
+function clearLocal() {
+    const rect = canvas.getBoundingClientRect();
+    ctx.clearRect(0, 0, rect.width, rect.height);
+}
 
+// ===== SignalR =====
 async function startSignalR() {
-    if (!window.signalR) {
-        statusEl.textContent = "SignalR client missing ❌";
-        return;
-    }
-
     connection = new signalR.HubConnectionBuilder()
         .withUrl("/whiteboardHub")
-        .configureLogging(signalR.LogLevel.Information)
         .withAutomaticReconnect()
+        .configureLogging(signalR.LogLevel.Information)
         .build();
 
-    // Receive remote draw events
+    connection.onreconnecting(() => {
+        statusEl.textContent = "Reconnecting…";
+    });
+
+    connection.onreconnected(() => {
+        statusEl.textContent = joined ? "Connected ✅ (Realtime)" : "Connected ✅ (Join to sync)";
+        // After reconnect, request state again
+        if (joined) connection.invoke("Join", myName).catch(console.error);
+    });
+
+    // receive 1 segment
     connection.on("ReceiveDraw", (data) => {
-        // data: { fromX, fromY, toX, toY, color, size, isStart }
         drawLine(
             { x: data.fromX, y: data.fromY },
             { x: data.toX, y: data.toY },
-            data.color || "#000000",
+            data.color || "#000",
             Number(data.size || 3)
         );
     });
 
-    // Receive remote clear
+    // receive clear
     connection.on("ReceiveClear", () => clearLocal());
+
+    // receive joined ack
+    connection.on("Joined", (info) => {
+        statusEl.textContent = `Connected ✅ as ${info.userName}`;
+    });
+
+    // receive full board state
+    connection.on("FullState", (segments) => {
+        clearLocal();
+        for (const s of segments) {
+            drawLine(
+                { x: s.fromX, y: s.fromY },
+                { x: s.toX, y: s.toY },
+                s.color || "#000",
+                Number(s.size || 3)
+            );
+        }
+    });
 
     try {
         await connection.start();
-        statusEl.textContent = "Connected ✅ (Realtime)";
+        statusEl.textContent = "Connected ✅ (Join to sync)";
     } catch (err) {
-        console.error("SignalR connect error:", err);
+        console.error(err);
         statusEl.textContent = "Connection failed ❌";
     }
 }
 
 startSignalR();
 
-// ====== Send helper (safe) ======
-function sendDraw(from, to, isStart) {
+// ===== Join button =====
+joinBtn.addEventListener("click", async () => {
     if (!connection || connection.state !== "Connected") return;
 
-    const payload = {
-        fromX: from.x,
-        fromY: from.y,
-        toX: to.x,
-        toY: to.y,
-        color: colorInput.value,
-        size: Number(sizeInput.value),
-        isStart: !!isStart
-    };
+    myName = (nameInput.value || "").trim();
+    if (!myName) myName = "User-" + Math.floor(Math.random() * 1000);
 
-    connection.invoke("SendDraw", payload).catch(console.error);
+    joined = true;
+    await connection.invoke("Join", myName).catch(console.error);
+    statusEl.textContent = "Syncing…";
+});
+
+// ===== send draw throttling (60fps) =====
+let pendingSend = null;
+let rafScheduled = false;
+
+function queueSendDraw(payload) {
+    if (!connection || connection.state !== "Connected" || !joined) return;
+
+    // keep only the most recent segment per frame (simple + effective)
+    pendingSend = payload;
+
+    if (!rafScheduled) {
+        rafScheduled = true;
+        requestAnimationFrame(() => {
+            rafScheduled = false;
+            if (!pendingSend) return;
+
+            const toSend = pendingSend;
+            pendingSend = null;
+
+            connection.invoke("SendDraw", toSend).catch(console.error);
+        });
+    }
 }
 
-// ====== Local drawing functions ======
+// ===== local drawing =====
 function startDrawing(e) {
+    if (!joined) return; // require join to participate (optional but cleaner)
     e.preventDefault();
     isDrawing = true;
 
     const p = getCanvasPointFromEvent(e);
     lastPoint = p;
 
-    // draw dot locally
-    drawLine(p, p, colorInput.value, Number(sizeInput.value));
+    const payload = {
+        fromX: p.x, fromY: p.y,
+        toX: p.x, toY: p.y,
+        color: colorInput.value,
+        size: Number(sizeInput.value),
+        userName: myName
+    };
 
-    // send dot as a tiny line
-    sendDraw(p, p, true);
+    drawLine(p, p, payload.color, payload.size);
+    queueSendDraw(payload);
 }
 
 function drawMove(e) {
-    if (!isDrawing) return;
+    if (!isDrawing || !joined) return;
     e.preventDefault();
 
     const p = getCanvasPointFromEvent(e);
 
-    // draw locally
-    drawLine(lastPoint, p, colorInput.value, Number(sizeInput.value));
+    const payload = {
+        fromX: lastPoint.x, fromY: lastPoint.y,
+        toX: p.x, toY: p.y,
+        color: colorInput.value,
+        size: Number(sizeInput.value),
+        userName: myName
+    };
 
-    // send to others
-    sendDraw(lastPoint, p, false);
+    drawLine(lastPoint, p, payload.color, payload.size);
+    queueSendDraw(payload);
 
     lastPoint = p;
 }
@@ -141,31 +194,25 @@ function drawMove(e) {
 function stopDrawing(e) {
     if (!isDrawing) return;
     e.preventDefault();
-
     isDrawing = false;
     lastPoint = null;
 }
 
-// ====== Clear (local + broadcast) ======
-function clearLocal() {
-    const rect = canvas.getBoundingClientRect();
-    ctx.clearRect(0, 0, rect.width, rect.height);
-}
+// mouse
+canvas.addEventListener("mousedown", startDrawing);
+canvas.addEventListener("mousemove", drawMove);
+canvas.addEventListener("mouseup", stopDrawing);
+canvas.addEventListener("mouseleave", stopDrawing);
 
+// touch
+canvas.addEventListener("touchstart", startDrawing, { passive: false });
+canvas.addEventListener("touchmove", drawMove, { passive: false });
+canvas.addEventListener("touchend", stopDrawing, { passive: false });
+
+// clear (broadcast)
 clearBtn.addEventListener("click", () => {
     clearLocal();
     if (connection && connection.state === "Connected") {
         connection.invoke("ClearBoard").catch(console.error);
     }
 });
-
-// ====== Mouse events ======
-canvas.addEventListener("mousedown", startDrawing);
-canvas.addEventListener("mousemove", drawMove);
-canvas.addEventListener("mouseup", stopDrawing);
-canvas.addEventListener("mouseleave", stopDrawing);
-
-// ====== Touch events ======
-canvas.addEventListener("touchstart", startDrawing, { passive: false });
-canvas.addEventListener("touchmove", drawMove, { passive: false });
-canvas.addEventListener("touchend", stopDrawing, { passive: false });
