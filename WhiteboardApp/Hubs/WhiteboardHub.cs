@@ -1,4 +1,6 @@
-﻿using Microsoft.AspNetCore.SignalR;
+﻿using System;
+using System.Linq;
+using Microsoft.AspNetCore.SignalR;
 using WhiteboardApp.Models;
 using WhiteboardApp.Services;
 
@@ -12,35 +14,65 @@ namespace WhiteboardApp.Hubs
         {
             _board = board;
         }
-
-        // Called by clients to sync their identity (optional)
-        public async Task Join(string userName)
+        // Join or create a room. If roomId is empty, a new room code will be created.
+        public async Task JoinRoom(string? roomId, string userName, string? password)
         {
-            // Send connection info back only to caller (optional UI use)
+            var created = false;
+
+            if (string.IsNullOrWhiteSpace(roomId))
+            {
+                roomId = GenerateRoomCode();
+            }
+
+            var allowed = _board.TryEnterRoom(roomId, password, out created);
+            if (!allowed)
+            {
+                await Clients.Caller.SendAsync("JoinFailed", new { reason = "Invalid password" });
+                return;
+            }
+
+            // Add connection to SignalR group for the room
+            await Groups.AddToGroupAsync(Context.ConnectionId, roomId);
+
+            // Acknowledge join and include room id
             await Clients.Caller.SendAsync("Joined", new
             {
                 connectionId = Context.ConnectionId,
-                userName = userName
+                userName = userName,
+                roomId = roomId,
+                created = created
             });
 
-            // Send full current board to caller (late joiner sync)
-            var all = _board.GetAll();
+            // Send full room state to caller
+            var all = _board.GetAll(roomId);
             await Clients.Caller.SendAsync("FullState", all);
         }
 
         public async Task SendDraw(DrawData data)
         {
-            // Save segment in memory
-            _board.Add(data);
+            if (data == null) return;
 
-            // Broadcast to everyone except sender
-            await Clients.Others.SendAsync("ReceiveDraw", data);
+            var roomId = data.RoomId ?? "__default";
+
+            // Save segment in memory (per-room)
+            _board.Add(roomId, data);
+
+            // Broadcast to everyone in the same room except sender
+            await Clients.GroupExcept(roomId, new[] { Context.ConnectionId }).SendAsync("ReceiveDraw", data);
         }
 
-        public async Task ClearBoard()
+        public async Task ClearBoard(string? roomId)
         {
-            _board.Clear();
-            await Clients.All.SendAsync("ReceiveClear");
+            var r = string.IsNullOrWhiteSpace(roomId) ? "__default" : roomId;
+            _board.Clear(r);
+            await Clients.Group(r).SendAsync("ReceiveClear");
+        }
+
+        private static string GenerateRoomCode()
+        {
+            const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+            var rng = new Random();
+            return new string(Enumerable.Range(0, 6).Select(_ => chars[rng.Next(chars.Length)]).ToArray());
         }
     }
 }

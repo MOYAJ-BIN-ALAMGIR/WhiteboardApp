@@ -7,6 +7,8 @@ const colorInput = document.getElementById("color");
 const sizeInput = document.getElementById("size");
 const clearBtn = document.getElementById("clearBtn");
 const statusEl = document.getElementById("status");
+const roomInput = document.getElementById("room");
+const roomPassInput = document.getElementById("roomPass");
 
 let isDrawing = false;
 let lastPoint = null;
@@ -14,6 +16,8 @@ let lastPoint = null;
 let connection = null;
 let myName = "";
 let joined = false;
+let myRoom = "";
+let myRoomPass = null;
 
 // ===== canvas sizing =====
 function resizeCanvasToDisplaySize() {
@@ -69,7 +73,7 @@ async function startSignalR() {
     connection.onreconnected(() => {
         statusEl.textContent = joined ? "Connected ✅ (Realtime)" : "Connected ✅ (Join to sync)";
         // After reconnect, request state again
-        if (joined) connection.invoke("Join", myName).catch(console.error);
+        if (joined) connection.invoke("JoinRoom", myRoom, myName, myRoomPass).catch(console.error);
     });
 
     // receive 1 segment
@@ -87,7 +91,8 @@ async function startSignalR() {
 
     // receive joined ack
     connection.on("Joined", (info) => {
-        statusEl.textContent = `Connected ✅ as ${info.userName}`;
+        myRoom = info.roomId || myRoom;
+        statusEl.textContent = `Connected ✅ as ${info.userName} (room ${myRoom})`;
     });
 
     // receive full board state
@@ -121,8 +126,11 @@ joinBtn.addEventListener("click", async () => {
     myName = (nameInput.value || "").trim();
     if (!myName) myName = "User-" + Math.floor(Math.random() * 1000);
 
+    myRoom = (roomInput.value || "").trim();
+    myRoomPass = (roomPassInput.value || "").trim() || null;
+
     joined = true;
-    await connection.invoke("Join", myName).catch(console.error);
+    await connection.invoke("JoinRoom", myRoom, myName, myRoomPass).catch(console.error);
     statusEl.textContent = "Syncing…";
 });
 
@@ -166,6 +174,8 @@ function startDrawing(e) {
         size: Number(sizeInput.value),
         userName: myName
     };
+    // annotate with room so server can route/store per-room
+    payload.roomId = myRoom;
 
     drawLine(p, p, payload.color, payload.size);
     queueSendDraw(payload);
@@ -184,6 +194,7 @@ function drawMove(e) {
         size: Number(sizeInput.value),
         userName: myName
     };
+    payload.roomId = myRoom;
 
     drawLine(lastPoint, p, payload.color, payload.size);
     queueSendDraw(payload);
@@ -213,6 +224,6 @@ canvas.addEventListener("touchend", stopDrawing, { passive: false });
 clearBtn.addEventListener("click", () => {
     clearLocal();
     if (connection && connection.state === "Connected") {
-        connection.invoke("ClearBoard").catch(console.error);
+        connection.invoke("ClearBoard", myRoom).catch(console.error);
     }
 });

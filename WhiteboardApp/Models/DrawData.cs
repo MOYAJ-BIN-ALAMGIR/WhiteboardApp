@@ -11,5 +11,7 @@
         public float Size { get; set; } = 2;
         public bool IsStart { get; set; } // optional
         public string? UserName { get; set; } // NEW
+        // Optional room identifier (null or empty = global/default)
+        public string? RoomId { get; set; }
     }
 }

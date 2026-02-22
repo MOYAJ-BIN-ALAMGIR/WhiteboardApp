@@ -6,6 +6,17 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorPages();
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<WhiteboardApp.Services.BoardState>();
+// Allow local testing from different origins (http/https/ports).
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("LocalCors", policy =>
+    {
+        policy.WithOrigins("https://localhost:7157", "http://localhost:7157", "http://localhost:46315")
+              .AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials();
+    });
+});
 
 
 var app = builder.Build();
@@ -20,6 +31,8 @@ if (!app.Environment.IsDevelopment())
 
 app.UseDefaultFiles();   // Looks for index.html
 app.UseStaticFiles();
+// Enable CORS before SignalR endpoints so browsers on different local origins can connect during testing.
+app.UseCors("LocalCors");
 app.MapHub<WhiteboardHub>("/whiteboardHub");
 app.UseHttpsRedirection();
 

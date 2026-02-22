@@ -4,36 +4,93 @@ namespace WhiteboardApp.Services
 {
     public class BoardState
     {
-        // In-memory list of all segments on the board
-        // Good enough for a project demo (not for huge boards/production).
-        private readonly List<DrawData> _segments = new();
-        private readonly object _lock = new();
-
-        public void Add(DrawData seg)
+        // Per-room in-memory state. Each room has its own list and optional password.
+        private class RoomState
         {
-            lock (_lock)
-            {
-                _segments.Add(seg);
+            public List<DrawData> Segments { get; } = new();
+            public string? Password { get; set; }
+            public object Lock { get; } = new();
+        }
 
-                // Safety cap to prevent memory growing forever in demos
-                if (_segments.Count > 200_000)
-                    _segments.RemoveRange(0, 50_000);
+        private readonly Dictionary<string, RoomState> _rooms = new(StringComparer.OrdinalIgnoreCase);
+        private readonly object _roomsLock = new();
+
+        private RoomState EnsureRoom(string roomId)
+        {
+            if (string.IsNullOrWhiteSpace(roomId)) roomId = "__default";
+
+            lock (_roomsLock)
+            {
+                if (!_rooms.TryGetValue(roomId, out var room))
+                {
+                    room = new RoomState();
+                    _rooms[roomId] = room;
+                }
+
+                return room;
             }
         }
 
-        public List<DrawData> GetAll()
+        // Try to enter or create a room. Returns true if allowed. 'created' indicates whether room was created now.
+        public bool TryEnterRoom(string roomId, string? password, out bool created)
         {
-            lock (_lock)
+            created = false;
+            if (string.IsNullOrWhiteSpace(roomId)) roomId = "__default";
+
+            lock (_roomsLock)
             {
-                return _segments.ToList();
+                if (!_rooms.TryGetValue(roomId, out var room))
+                {
+                    // create new room with optional password
+                    room = new RoomState { Password = password };
+                    _rooms[roomId] = room;
+                    created = true;
+                    return true;
+                }
+
+                // existing room: if password set, require match
+                if (!string.IsNullOrEmpty(room.Password))
+                {
+                    return string.Equals(room.Password, password ?? string.Empty, StringComparison.Ordinal);
+                }
+
+                return true;
             }
         }
 
-        public void Clear()
+        public void Add(string roomId, DrawData seg)
         {
-            lock (_lock)
+            var room = EnsureRoom(roomId);
+            lock (room.Lock)
             {
-                _segments.Clear();
+                room.Segments.Add(seg);
+
+                if (room.Segments.Count > 200_000)
+                    room.Segments.RemoveRange(0, 50_000);
+            }
+        }
+
+        public List<DrawData> GetAll(string roomId)
+        {
+            if (string.IsNullOrWhiteSpace(roomId)) roomId = "__default";
+
+            lock (_roomsLock)
+            {
+                if (!_rooms.TryGetValue(roomId, out var room)) return new List<DrawData>();
+                lock (room.Lock) return room.Segments.ToList();
+            }
+        }
+
+        public void Clear(string roomId)
+        {
+            if (string.IsNullOrWhiteSpace(roomId)) roomId = "__default";
+
+            lock (_roomsLock)
+            {
+                if (_rooms.TryGetValue(roomId, out var room))
+                {
+                    lock (room.Lock) room.Segments.Clear();
+                }
             }
         }
     }
